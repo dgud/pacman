@@ -169,7 +169,7 @@ game_loop(G) when G#game.quit == true ->
     final(G);
 game_loop(G) ->
     T0 = now_milli(),
-    G1 = paint(G),
+    G1 = wx:batch(fun() -> paint(G) end),
     T1 = now_milli(),
     T = (T0+40)-T1,
     if T =< 0 ->
@@ -307,8 +307,9 @@ init() ->
     wx:new(),
     Width  = ?BlockSize*?NBlocks,
     Height = (?BlockSize+1)*?NBlocks,
-    Win    = wxFrame:new(wx:null(), -1, "Pacman", [{size, {Width, Height}}]),
-    Panel  = wxGLCanvas:new(Win, [{attribList, [?WX_GL_RGBA,?WX_GL_DOUBLEBUFFER,0]}]),
+    Win    = wxFrame:new(wx:null(), -1, "Pacman", [{size, {Width+20, Height+100}}]),
+    Panel  = wxGLCanvas:new(Win, [{size, {Width+20, Height+100}},
+				  {attribList, [?WX_GL_RGBA,?WX_GL_DOUBLEBUFFER,0]}]),
 
     wxPanel:connect(Panel, key_down),
     wxPanel:connect(Panel, key_up),
@@ -316,11 +317,11 @@ init() ->
     wxFrame:show(Win),
     wxGLCanvas:setCurrent(Panel),
     wxGLCanvas:setFocus(Panel),
-    {W,H} = wxWindow:getClientSize(Win),
-    gl:viewport(0,0,W,H),
+    {W,H} = wxWindow:getClientSize(Panel),
+    gl:viewport(5,5,W-5,H-5),
     gl:matrixMode(?GL_PROJECTION),
     gl:loadIdentity(),
-    glu:ortho2D(0.0, W, 0.0, H),
+    glu:ortho2D(-1.0, W, -1.0, H),
     gl:enable(?GL_BLEND),
     gl:blendFunc(?GL_SRC_ALPHA, ?GL_ONE_MINUS_SRC_ALPHA),
     gl:matrixMode(?GL_MODELVIEW),
