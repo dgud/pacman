@@ -10,7 +10,7 @@
 -module(pacman).
 
 -export([start/0, start_link/0]).
--export([run_game/1]).
+-export([run_game/0]).
 
 -import(lists, [map/2]).
 
@@ -20,7 +20,8 @@
 -define(dbg(F,A), ok).
 -endif.
 
--include_lib("epx/include/epx_image.hrl").
+-include_lib("wx/include/wx.hrl").
+-include_lib("wx/include/gl.hrl").
 
 -define(WALL_LEFT,  16#01).
 -define(WALL_ABOVE, 16#02).
@@ -69,12 +70,12 @@
 -define(MaxSpeed, 6).
 -define(ValidSpeeds, {1,2,3,4,6,8}).
 
--define(CoordToPos(X,Y), 
+-define(CoordToPos(X,Y),
 	(((X) div ?BlockSize) + ?NBlocks*((Y) div ?BlockSize)) ).
 -define(XToLoc(X), ((X) rem ?BlockSize)).
 -define(YToLoc(Y), ((Y) rem ?BlockSize)).
 -define(LocToPos(I, J), ((I) + ?NBlocks*(J))).  %% I=column J=row
-	       
+
 -define(PosToX(Pos), ( ((Pos) rem ?NBlocks)*?BlockSize)).
 -define(PosToY(Pos), ( ((Pos) div ?NBlocks)*?BlockSize)).
 -define(PosToCoord(Pos), { ?PosToX(Pos), ?PosToY(Pos)}).
@@ -91,8 +92,8 @@
 
 -record(pacman,
 	{
-	  x  = 0, 
-	  y  = 0, 
+	  x  = 0,
+	  y  = 0,
 	  dx = 1,
 	  dy = 1
 	}).
@@ -113,7 +114,7 @@
 	  fmsmall,         %% FontMetrics
 	  fmlarge,         %% FontMetrics
 
-	  dotcolor      = {255,192,192,0},
+	  dotcolor      = {255,192,192,255},
 	  bigdotcolor   = 192,
 	  dbigdotcolor  = -2,
 	  mazecolor     = {255,32,192,255},
@@ -136,7 +137,7 @@
 	  deathcounter,
 
 	  ghosts,         %% [ #ghost {} [ nrofghosts
-	  pacman,         %% #pacman 
+	  pacman,         %% #pacman
 
 	  reqdx,
 	  reqdy,
@@ -154,12 +155,15 @@ start() ->
     application:start(pacman).
 
 start_link() ->
-    epx:start(),
-    Backend = epx_backend:default(),
-    {ok,proc_lib:spawn_link(?MODULE, run_game, [Backend])}.
-    
-run_game(Backend) ->
-    game_loop(init(Backend)).
+    {ok,proc_lib:spawn_link(?MODULE, run_game, [])}.
+
+run_game() ->
+    try
+	game_loop(init())
+    catch _:Reason ->
+	    io:format("CRASH ~p: ~p~n",[Reason, erlang:get_stacktrace()]),
+	    error
+    end.
 
 game_loop(G) when G#game.quit == true ->
     final(G);
@@ -171,8 +175,10 @@ game_loop(G) ->
     if T =< 0 ->
 	    game_loop(G1);
        true ->
-	    receive 
-	    after T -> 
+	    receive
+	    after T ->
+		    %% Sync driver thread
+		    wx_misc:getKeyState(?WXK_LEFT),
 		    game_loop(check_input(G1))
 	    end
     end.
@@ -180,12 +186,15 @@ game_loop(G) ->
 %% poll all key events
 check_input(G) ->
     receive
-	{epx_event,_Win, destroy} ->
+	#wx{event=#wxClose{}} ->
 	    G#game { quit = true };
-	{epx_event,_Win,{key_press,Sym,_Mod,_Code}} ->
+	#wx{event=#wxKey{type=key_down, keyCode=Sym}} ->
 	    check_input(key_down(Sym, G));
-	{epx_event,_Win,{key_release,Sym,_Mod,_Code}} ->
-	    check_input(key_up(Sym, G))
+	#wx{event=#wxKey{type=key_up, keyCode=Sym}} ->
+	    check_input(key_up(Sym, G));
+	Got ->
+	    io:format("Got ~p~n",[Got]),
+	    G
     after 0 ->
 	    G
     end.
@@ -198,59 +207,52 @@ key_down(Key, G) when G#game.ingame == false ->
        true ->
 	    G
     end;
-key_down(Key, G) when G#game.ingame == true ->       
+key_down(Key, G) when G#game.ingame == true ->
     case Key of
 	27 ->    G#game { ingame = false };
 	$q   ->  G#game { quit = true };
 	$Q   ->  G#game { quit = true };
-	left ->  G#game { reqdx = -1, reqdy = 0 };
-	right -> G#game { reqdx = 1,  reqdy = 0 };
-	up ->    G#game { reqdx = 0,  reqdy = -1 };
-	down ->  G#game { reqdx = 0,  reqdy = 1 };
-	_ -> G
+	?WXK_LEFT  -> G#game { reqdx = -1, reqdy = 0 };
+	?WXK_RIGHT -> G#game { reqdx = 1,  reqdy = 0 };
+	?WXK_UP ->    G#game { reqdx = 0,  reqdy = 1 };
+	?WXK_DOWN ->  G#game { reqdx = 0,  reqdy = -1 };
+	_ ->
+	    G
     end;
 key_down(_, G) ->
     G.
 
 key_up(Key, G) ->
-    if Key == left;
-       Key == right;
-       Key == down;
-       Key == up ->
-	    G#game { reqdx = 0, reqdy = 0};
+    if %% Key == ?WXK_LEFT;
+       %% Key == ?WXK_RIGHT;
+       %% Key == ?WXK_DOWN;
+       %% Key == ?WXK_UP ->
+       %% 	    G#game { reqdx = 0, reqdy = 0};
        true ->
 	    G
     end.
 
 now_milli() ->
-    {M,S,Us} = now(),
+    {M,S,Us} = os:timestamp(),
     1000*(M*1000000+S)+(Us div 1000).
 
 
 load_image(FileName) ->
     PathName = filename:join(code:priv_dir(pacman), FileName),
-    {ok, #epx_image { pixmaps = [Image]}} = epx_image:load(PathName),
-    Image.
+    {Data, Format} = get_data_for_use_with_teximage2d(PathName),
+    32*32*4 = size(Data),
+    [TId] = gl:genTextures(1),
+    gl:bindTexture(?GL_TEXTURE_2D, TId),
+    gl:texParameteri(?GL_TEXTURE_2D, ?GL_TEXTURE_MAG_FILTER, ?GL_NEAREST),
+    gl:texParameteri(?GL_TEXTURE_2D, ?GL_TEXTURE_MIN_FILTER, ?GL_NEAREST),
+    gl:texImage2D(?GL_TEXTURE_2D, 0, Format, 32, 32, 0, Format, ?GL_UNSIGNED_BYTE, Data),
+    TId.
+
 
 load_directions(FileName) ->
-    Right  = load_image(FileName),
-    W  = epx:pixmap_info(Right, width),
-    H = epx:pixmap_info(Right, height),
-    Format = epx:pixmap_info(Right, pixel_format),
-    Cx = (W div 2),
-    Cy = (H div 2),
-    E = 0.001,  %% works, but check me!!!
-    Up = epx:pixmap_create(W, H, Format),
-    epx:pixmap_rotate_area(Right, Up, math:pi()/2+E,0,0,Cx,Cy,Cx,Cy,W,H,[]),
+    Tid = load_image(FileName),
+    {{180, Tid}, {0, Tid}, {90, Tid}, {270, Tid}}.
 
-    Down = epx:pixmap_create(W, H, Format),
-    epx:pixmap_rotate_area(Right, Down, -math:pi()/2,0,0,Cx,Cy,Cx,Cy,W,H,[]),
-
-    Left = epx:pixmap_create(W, H, Format),
-    epx:pixmap_rotate_area(Right, Left, math:pi()+E,0,0,Cx,Cy,Cx,Cy,W,H,[]),
-    {Right,Left,Up,Down}.
-
-    
 load_images() ->
     {R2,L2,U2,D2} = load_directions("PacMan2.png"),
     {R3,L3,U3,D3} = load_directions("PacMan3.png"),
@@ -267,40 +269,75 @@ load_images() ->
 	      pacman_right = {P,R2,R3,R4},
 	      pacman_up    = {P,U2,U3,U4},
 	      pacman_down  = {P,D2,D3,D4}
-	 }.
+	    }.
+
+get_data_for_use_with_teximage2d(PathName) ->
+    Image = wxImage:new(PathName),
+    Format = case wxImage:hasAlpha(Image) of
+		 true  -> ?GL_RGBA;
+		 false ->
+		     true = wxImage:hasMask(Image),
+		     wxImage:initAlpha(Image),
+		     ?GL_RGBA
+	     end,
+    22 = wxImage:getWidth(Image),
+    22 = wxImage:getHeight(Image),
+    RGB = wxImage:getData(Image),
+    Alpha = wxImage:getAlpha(Image),
+    RBGA = interleave_rgb_and_alpha(RGB, Alpha),
+    PadSize = (32*4 - 22*4)*8,
+    RBGAPadded = << <<Bin/binary, 0:PadSize>> || <<Bin:(22*4)/binary>> <= RBGA>>,
+    PadRows = (32-22)*32*4*8,
+    {<<RBGAPadded/binary, 0:PadRows>>, Format}.
+
+interleave_rgb_and_alpha(RGB, Alpha) ->
+    list_to_binary(
+      lists:zipwith(fun({R, G, B}, A) ->
+			    <<R, G, B, A>>
+		    end,
+		    [{R,G,B} || <<R, G, B>> <= RGB],
+		    [A || <<A>> <= Alpha])).
+
 
 final(G) ->
-    %% epx:pixmap_destroy(G#game.goff),
-    epx:window_detach(G#game.win),
+    wxFrame:destroy(G#game.win),
     ok.
 
-init(Backend) ->
-    Width = ?BlockSize*?NBlocks,
+init() ->
+    wx:new(),
+    Width  = ?BlockSize*?NBlocks,
     Height = (?BlockSize+1)*?NBlocks,
-    Win    = epx:window_create(50, 50, Width, Height,[key_press,key_release]),
-    epx:window_attach(Win, Backend),
-    Goff  = epx:pixmap_create(Width, Height),
-    epx:pixmap_attach(Goff, Backend),
-    %% g.setFont(smallfont);
-    %% fmsmall = g.getFontMetrics();
-    %% g.setFont(largefont);
-    %% fmlarge = g.getFontMetrics();
+    Win    = wxFrame:new(wx:null(), -1, "Pacman", [{size, {Width, Height}}]),
+    Panel  = wxGLCanvas:new(Win, [{attribList, [?WX_GL_RGBA,?WX_GL_DOUBLEBUFFER,0]}]),
+
+    wxPanel:connect(Panel, key_down),
+    wxPanel:connect(Panel, key_up),
+    wxFrame:connect(Win,   close_window, [{skip, false}]),
+    wxFrame:show(Win),
+    wxGLCanvas:setCurrent(Panel),
+    wxGLCanvas:setFocus(Panel),
+    {W,H} = wxWindow:getClientSize(Win),
+    gl:viewport(0,0,W,H),
+    gl:matrixMode(?GL_PROJECTION),
+    gl:loadIdentity(),
+    glu:ortho2D(0.0, W, 0.0, H),
+    gl:enable(?GL_BLEND),
+    gl:blendFunc(?GL_SRC_ALPHA, ?GL_ONE_MINUS_SRC_ALPHA),
+    gl:matrixMode(?GL_MODELVIEW),
 
     G = #game {  win    = Win,
-		 goff   = Goff,
+		 goff   = Panel,
 		 width  = Width,
 		 height = Height,
 		 images = load_images(),
 		 maze   = {},
-		 %% setBackground(Color.black);
-		 %% g=getGraphics();
 		 ghosts = [],
 		 pacman = #pacman {}
 		},
     game_init(G).
 
 
-game_init(G) ->    
+game_init(G) ->
     G1 = G#game { pacsleft   = 3,
 		  score      = 0,
 		  scaredtime = ?MaxScaredTime
@@ -350,10 +387,7 @@ level_continue(G) ->
 
 paint(G) ->
     Goff = G#game.goff,
-    epx_gc:set_fill_style(solid),
-    epx_gc:set_fill_color({255,0,0,0}),
-    epx_gc:set_border_width(0),
-    epx:draw_rectangle(Goff, 0, 0, G#game.width, G#game.height),
+    gl:clear(?GL_COLOR_BUFFER_BIT bor ?GL_DEPTH_BUFFER_BIT),
     G1 = draw_maze(G),
     G2 = draw_score(G1),
     G3 = do_anim(G2),
@@ -362,13 +396,12 @@ paint(G) ->
 	    true ->
 		 play_demo(G3)
 	 end,
-    epx:pixmap_draw(Goff, G4#game.win, 0, 0, 0, 0, G4#game.width, G4#game.height),
+    wxGLCanvas:swapBuffers(Goff),
     G4.
 
 draw_maze(G) ->
     BSz       = ?BlockSize-1,
     Maze      = G#game.maze,
-    Goff      = G#game.goff,
     MazeColor = G#game.mazecolor,
     DotColor  = G#game.dotcolor,
     BigDotColor = G#game.bigdotcolor + G#game.dbigdotcolor,
@@ -383,34 +416,40 @@ draw_maze(G) ->
 		 X = ?PosToX(I),
 		 Y = ?PosToY(I),
 		 Z = get_maze_pos(I,Maze),
-		 epx_gc:set_foreground_color(MazeColor),
+		 gl:'begin'(?GL_LINES),
+		 gl:color4ubv(MazeColor),
 		 if ?IS_WALL_LEFT(Z) ->
-			 epx:draw_line(Goff,X,Y,X,Y+BSz);
+			 gl:vertex2d(X,Y), gl:vertex2d(X,Y+BSz);
 		    true -> ok
 		 end,
 		 if ?IS_WALL_ABOVE(Z) ->
-			 epx:draw_line(Goff,X,Y,X+BSz,Y);
+			 gl:vertex2d(X,Y), gl:vertex2d(X+BSz,Y);
 		    true -> ok
 		 end,
 		 if ?IS_WALL_RIGHT(Z) ->
-			 epx:draw_line(Goff,X+BSz,Y,X+BSz,Y+BSz);
+			 gl:vertex2d(X+BSz,Y), gl:vertex2d(X+BSz,Y+BSz);
 		    true -> ok
 		 end,
 		 if ?IS_WALL_BELOW(Z) ->
-			 epx:draw_line(Goff,X,Y+BSz,X+BSz,Y+BSz);
+			 gl:vertex2d(X,Y+BSz), gl:vertex2d(X+BSz,Y+BSz);
 		    true -> ok
 		 end,
+		 gl:'end'(),
+		 gl:'begin'(?GL_QUADS),
 		 if ?IS_FOOD_SMALL(Z) ->
-			 epx_gc:set_fill_color(DotColor),
-			 epx:draw_rectangle(Goff,X+11,Y+11,2,2);
+			 gl:color4ubv(DotColor),
+			 gl:vertex2d(X+11,Y+11), gl:vertex2d(X+13,Y+11),
+			 gl:vertex2d(X+13,Y+13), gl:vertex2d(X+11,Y+13);
 		    true -> ok
 		 end,
 		 if ?IS_FOOD_BIG(Z) ->
-			 epx_gc:set_fill_color({255,224,224-BigDotColor,
-					     BigDotColor}),
-			 epx:draw_rectangle(Goff,X+8,Y+8,8,8);
+			 gl:color4ubv({255,224,224-BigDotColor,BigDotColor}),
+			 gl:vertex2d(X+8,Y+8), gl:vertex2d(X+16,Y+8),
+			 gl:vertex2d(X+16,Y+16), gl:vertex2d(X+8,Y+16);
 		    true -> ok
-		 end
+		 end,
+		 gl:'end'(),
+		 ok
 	 end),
     G#game { bigdotcolor = BigDotColor,
 	     dbigdotcolor = DBigDotColor }.
@@ -423,8 +462,7 @@ draw_score(G) ->
     %%  G#game.smallfont, {0,96,128,255}),
     each(0, G#game.pacsleft-1,
 	 fun(I) ->
-		 draw_image(G, 
-			    element(3, Image#images.pacman_left),
+		 draw_image(element(3, Image#images.pacman_left),
 			    I*28+8, G#game.height-1)
 	 end),
     G.
@@ -432,7 +470,7 @@ draw_score(G) ->
 
 do_anim(G) ->
     AnimCount0 = G#game.animcount - 1,
-    AnimCount  = if AnimCount0 =< 0 -> 
+    AnimCount  = if AnimCount0 =< 0 ->
 			 ?AnimDelay;
 		    true ->
 			 AnimCount0
@@ -490,7 +528,7 @@ check_scared(G) ->
     Maze0 = G#game.maze,
     Maze = if Scared == true ->
 		   Maze1 = set_maze_loc(6, 7, Maze0,
-					?WALL_ABOVE bor ?WALL_BELOW bor 
+					?WALL_ABOVE bor ?WALL_BELOW bor
 					?WALL_LEFT),
 		   set_maze_loc(8, 7, Maze1,
 				?WALL_ABOVE bor ?WALL_BELOW bor ?WALL_RIGHT);
@@ -512,8 +550,8 @@ check_maze(G) ->
     Max = ?NBlocks*?NBlocks,
     I1 = while(0,
 	       fun(I) ->
-		       (I < Max) andalso 
-		       ((get_maze_pos(I, Maze0) band 
+		       (I < Max) andalso
+		       ((get_maze_pos(I, Maze0) band
 			 (?FOOD_SMALL bor ?FOOD_BIG)) == 0)
 	       end,
 	       fun(I) -> I + 1 end),
@@ -582,7 +620,7 @@ move_pacman(G) ->
 move_pacman(G, P) ->
     Dx = G#game.reqdx,
     Dy = G#game.reqdy,
-    if Dx == -P#pacman.dx, 
+    if Dx == -P#pacman.dx,
        Dy == -P#pacman.dy ->
 	    check_pacman(G#game { viewdx = Dx, viewdy = Dy },
 			 P#pacman { dx=Dx, dy=Dy });
@@ -606,7 +644,7 @@ junction_pacman(G, P) ->
     Z = get_maze_pos(Pos, Maze),
     if ?IS_FOOD_SMALL(Z) ->
 	    Z1 = Z band 16#0f,
-	    Maze1 = set_maze_pos(Pos, Maze, Z1), 
+	    Maze1 = set_maze_pos(Pos, Maze, Z1),
 	    Score = G#game.score + 1,
 	    turn_pacman(G#game { maze = Maze1, score = Score },
 			 P, Z1);
@@ -621,8 +659,8 @@ junction_pacman(G, P) ->
        true ->
 	    turn_pacman(G, P, Z)
     end.
-    
-    
+
+
 %%% Check if pacman wants to turn
 turn_pacman(G,P,Z) ->
     Dx = G#game.reqdx,
@@ -636,7 +674,7 @@ turn_pacman(G,P,Z) ->
 	    block_pacman(G#game { viewdx=Dx, viewdy=Dy },
 			 P#pacman { dx = Dx, dy = Dy }, Z)
     end.
-    
+
 %% stop pacman from going into wall.
 block_pacman(G,P,Z)->
     Dx = P#pacman.dx,
@@ -653,7 +691,7 @@ block_pacman(G,P,Z)->
 	    forward_pacman(G, P, Z, ?PacManSpeed)
     end.
 
-%% move pacman accoring to direction and speed	
+%% move pacman accoring to direction and speed
 forward_pacman(G,P,_Z,Speed) ->
     X = P#pacman.x + Speed*P#pacman.dx,
     Y = P#pacman.y + Speed*P#pacman.dy,
@@ -662,42 +700,64 @@ forward_pacman(G,P,_Z,Speed) ->
 draw_pacman(G) ->
     Image = G#game.images,
     Pos = G#game.pacmananimpos + 1,
-    if G#game.viewdx == -1 ->
-	    draw_pacman(G, element(Pos, Image#images.pacman_left));
-       G#game.viewdx == 1 ->
+    if G#game.viewdx == 1 ->
 	    draw_pacman(G, element(Pos, Image#images.pacman_right));
        G#game.viewdy == -1 ->
 	    draw_pacman(G, element(Pos, Image#images.pacman_up));
-       true -> 
-	    draw_pacman(G, element(Pos, Image#images.pacman_down))
+       G#game.viewdy == 1 ->
+	    draw_pacman(G, element(Pos, Image#images.pacman_down));
+       true ->
+	    draw_pacman(G, element(Pos, Image#images.pacman_left))
     end.
 
 draw_pacman(G, Image) ->
     PacMan = G#game.pacman,
-    draw_image(G, Image, PacMan#pacman.x+1, PacMan#pacman.y+1).
+    draw_image(Image, PacMan#pacman.x+1, PacMan#pacman.y+1).
 
 draw_ghost(G, H) ->
     X = H#ghost.x,
     Y = H#ghost.y,
     Image = G#game.images,
     if G#game.ghostanimpos == 0, G#game.scared == false ->
-	    draw_image(G, Image#images.ghost1, X+1, Y+1);
+	    draw_image(Image#images.ghost1, X+1, Y+1);
        G#game.ghostanimpos == 1, G#game.scared == false ->
-	    draw_image(G, Image#images.ghost2, X+1, Y+1);
+	    draw_image(Image#images.ghost2, X+1, Y+1);
        G#game.ghostanimpos == 0, G#game.scared == true ->
-	    draw_image(G, Image#images.ghostscared1, X+1, Y+1);
+	    draw_image(Image#images.ghostscared1, X+1, Y+1);
        G#game.ghostanimpos == 1, G#game.scared == true ->
-	    draw_image(G, Image#images.ghostscared2, X+1, Y+1);
+	    draw_image(Image#images.ghostscared2, X+1, Y+1);
        true ->
 	    ok
     end.
 
+draw_image({Rotate, Pixmap}, X, Y) ->
+    gl:enable(?GL_TEXTURE_2D),
+    gl:bindTexture(?GL_TEXTURE_2D, Pixmap),
+    gl:pushMatrix(),
+    gl:translatef(X+11,Y+11,0.0),
+    gl:rotatef(Rotate, 0.0,0.0,1.0),
+    gl:'begin'(?GL_QUADS),
+    MaxX = MaxY = 22/32,
+    gl:texCoord2f(MaxX, MaxY), gl:vertex2i(-11,-11),
+    gl:texCoord2f(0.0,  MaxY), gl:vertex2i( 11,-11),
+    gl:texCoord2f(0.0,  0.0),  gl:vertex2i( 11, 11),
+    gl:texCoord2f(MaxX, 0.0),  gl:vertex2i(-11, 11),
+    gl:'end'(),
+    gl:popMatrix(),
+    gl:disable(?GL_TEXTURE_2D);
+draw_image(TId, X, Y) ->
+    gl:enable(?GL_TEXTURE_2D),
+    gl:bindTexture(?GL_TEXTURE_2D, TId),
+    gl:'begin'(?GL_QUADS),
+    MaxX = MaxY = 22/32,
+    gl:texCoord2f(MaxX, MaxY), gl:vertex2i(X,   Y),
+    gl:texCoord2f(0.0,  MaxY), gl:vertex2i(X+22,Y),
+    gl:texCoord2f(0.0,  0.0),  gl:vertex2i(X+22,Y+22),
+    gl:texCoord2f(MaxX, 0.0),  gl:vertex2i(X,   Y+22),
+    gl:'end'(),
+    gl:disable(?GL_TEXTURE_2D).
 
-draw_image(G, Pixmap, X, Y) ->
-    Goff = G#game.goff,
-    epx:pixmap_copy_area(Pixmap, Goff, 0, 0, X, Y, 22, 22, [blend]).
 
-    
 move_ghosts(G) ->
     move_ghosts(G, G#game.ghosts, []).
 
@@ -777,8 +837,8 @@ move_ghost(G, H) ->
 %%
 %% Maze stuff
 %%
-level1data() -> 
-    { 
+level1data() ->
+    {
 	    19,26,26,22, 9,12,19,26,22, 9,12,19,26,26,22,
 	    37,11,14,17,26,26,20,15,17,26,26,20,11,14,37,
 	    17,26,26,20,11, 6,17,26,20, 3,14,17,26,26,20,
@@ -793,37 +853,37 @@ level1data() ->
 	    21, 9, 8, 8, 4,17,26, 8,26,20, 1, 8, 8,12,21,
 	    17,26,26,22,13,21,11, 2,14,21,13,19,26,26,20,
 	    37,11,14,17,26,24,22,13,19,24,26,20,11,14,37,
-	    25,26,26,28, 3, 6,25,26,28, 3, 6,25,26,26,28  
+	    25,26,26,28, 3, 6,25,26,28, 3, 6,25,26,26,28
 	   }.
 
 %% get maze data with either straigh pos, location or coordinate
 get_maze_pos(Pos, Maze) ->
     element(Pos+1, Maze).
 
-get_maze_xy(X, Y, Maze) ->
-    element(?CoordToPos(X, Y)+1, Maze).
+%% get_maze_xy(X, Y, Maze) ->
+%%     element(?CoordToPos(X, Y)+1, Maze).
 
-get_maze_loc(I, J, Maze) ->
-    element(?LocToPos(I, J)+1, Maze).
+%% get_maze_loc(I, J, Maze) ->
+%%     element(?LocToPos(I, J)+1, Maze).
 
 %% set maze data with either straigh pos, location or coordinate
 
 set_maze_pos(Pos, Maze, Code) ->
     setelement(Pos+1, Maze, Code).
 
-set_maze_xy(X, Y, Maze, Code) ->
-    setelement(?CoordToPos(X,Y)+1, Maze, Code).    
+%% set_maze_xy(X, Y, Maze, Code) ->
+%%     setelement(?CoordToPos(X,Y)+1, Maze, Code).
 
 set_maze_loc(I, J, Maze, Code) ->
     setelement(?LocToPos(I,J)+1, Maze, Code).
 
 %% change direction if Pos <= Min or Pos >= Max
-bounce(Pos, Min, Max, Dir) -> 
+bounce(Pos, Min, Max, Dir) ->
     if Pos =< Min -> -Dir;
        Pos >= Max -> -Dir;
        true -> Dir
     end.
-        
+
 %%
 %% Utilities
 %%
@@ -835,12 +895,12 @@ each(I, N, Fun) ->
 	    each(I+1, N, Fun)
     end.
 
-each(I, Step, N, Fun) ->
-    if I > N -> ok;
-       true ->
-	    Fun(I),
-	    each(I+Step, Step, N, Fun)
-    end.
+%% each(I, Step, N, Fun) ->
+%%     if I > N -> ok;
+%%        true ->
+%% 	    Fun(I),
+%% 	    each(I+Step, Step, N, Fun)
+%%     end.
 
 
 while(Acc, Done, Body) ->
