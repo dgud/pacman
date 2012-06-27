@@ -70,6 +70,9 @@
 -define(MaxSpeed, 6).
 -define(ValidSpeeds, {1,2,3,4,6,8}).
 
+-define(MAX_BM_W, 256).
+-define(MAX_BM_H, 64).
+
 -define(CoordToPos(X,Y),
 	(((X) div ?BlockSize) + ?NBlocks*((Y) div ?BlockSize)) ).
 -define(XToLoc(X), ((X) rem ?BlockSize)).
@@ -101,18 +104,16 @@
 
 -record(game,
 	{
+	  panel,           %% GL Panel
 	  goff,            %% offscreem pixmap
+	  fid,             %% Font TextureID
 	  win,             %% window
 	  width,           %% screem width
 	  height,          %% screen height
 
 	  images,          %% #images {}
 
-	  largefont,       %% new Font("Helvetica", Font.BOLD, 24);
-	  smallfont,       %% new Font("Helvetica", Font.BOLD, 14);
-
-	  fmsmall,         %% FontMetrics
-	  fmlarge,         %% FontMetrics
+	  font,            
 
 	  dotcolor      = {255,192,192,255},
 	  bigdotcolor   = 192,
@@ -173,12 +174,12 @@ game_loop(G) ->
     T1 = now_milli(),
     T = (T0+40)-T1,
     if T =< 0 ->
-	    game_loop(G1);
+	    game_loop(check_input(G1));
        true ->
+	    wx_misc:getKeyState(?WXK_LEFT),
 	    receive
 	    after T ->
 		    %% Sync driver thread
-		    wx_misc:getKeyState(?WXK_LEFT),
 		    game_loop(check_input(G1))
 	    end
     end.
@@ -222,7 +223,7 @@ key_down(Key, G) when G#game.ingame == true ->
 key_down(_, G) ->
     G.
 
-key_up(Key, G) ->
+key_up(_Key, G) ->
     if %% Key == ?WXK_LEFT;
        %% Key == ?WXK_RIGHT;
        %% Key == ?WXK_DOWN;
@@ -299,6 +300,35 @@ interleave_rgb_and_alpha(RGB, Alpha) ->
 		    [A || <<A>> <= Alpha])).
 
 
+draw_text(#game{goff=Bmp, fid=Fid, font=Font}, {X,Y}, String, {R,G,B}) ->
+    DC = wxMemoryDC:new(Bmp),
+    wxMemoryDC:setFont(DC, Font),
+    wxMemoryDC:setBackground(DC, ?wxBLACK_BRUSH),
+    wxMemoryDC:clear(DC),
+    wxMemoryDC:setTextForeground(DC, {255, 255, 255}),
+    wxMemoryDC:drawText(DC, String, {0,0}),
+    {StrW0, StrH0} = wxDC:getTextExtent(DC, String),
+    StrW = min(StrW0, ?MAX_BM_W),
+    StrH = min(StrH0, ?MAX_BM_H),
+    Img   = wxBitmap:convertToImage(Bmp),
+    Alpha = wxImage:getData(Img),
+    wxMemoryDC:destroy(DC),
+    wxImage:destroy(Img),
+    RGBA = << <<R:8,G:8,B:8,A:8>> || <<A:8,_:8,_:8>> <= Alpha >>,
+    gl:bindTexture(?GL_TEXTURE_2D, Fid),
+    gl:texImage2D(?GL_TEXTURE_2D, 0, ?GL_RGBA, ?MAX_BM_W, ?MAX_BM_H, 0, 
+		  ?GL_RGBA, ?GL_UNSIGNED_BYTE, RGBA),
+    gl:enable(?GL_TEXTURE_2D),
+    gl:'begin'(?GL_QUADS),
+    MaxX = StrW / ?MAX_BM_W,
+    MaxY = StrH / ?MAX_BM_H,
+    gl:texCoord2f(0.0, MaxY), gl:vertex2i(X,     Y),
+    gl:texCoord2f(MaxX,  MaxY), gl:vertex2i(X+StrW,Y),
+    gl:texCoord2f(MaxX,  0.0),  gl:vertex2i(X+StrW,Y+StrH),
+    gl:texCoord2f(0.0, 0.0),  gl:vertex2i(X,     Y+StrH),
+    gl:'end'(),
+    gl:disable(?GL_TEXTURE_2D).
+
 final(G) ->
     wxFrame:destroy(G#game.win),
     ok.
@@ -325,9 +355,18 @@ init() ->
     gl:enable(?GL_BLEND),
     gl:blendFunc(?GL_SRC_ALPHA, ?GL_ONE_MINUS_SRC_ALPHA),
     gl:matrixMode(?GL_MODELVIEW),
+    [Fid] = gl:genTextures(1),
+    gl:bindTexture(?GL_TEXTURE_2D, Fid),
+    gl:texParameteri(?GL_TEXTURE_2D, ?GL_TEXTURE_MAG_FILTER, ?GL_LINEAR),
+    gl:texParameteri(?GL_TEXTURE_2D, ?GL_TEXTURE_MIN_FILTER, ?GL_LINEAR),
+    gl:texEnvf(?GL_TEXTURE_ENV, ?GL_TEXTURE_ENV_MODE, ?GL_REPLACE),
 
+    Font = wxFont:new(24, ?wxFONTFAMILY_DEFAULT, ?wxFONTSTYLE_NORMAL, ?wxFONTWEIGHT_BOLD),
     G = #game {  win    = Win,
-		 goff   = Panel,
+		 panel  = Panel,
+		 goff   = wxBitmap:new(?MAX_BM_W, ?MAX_BM_H),
+		 fid    = Fid,
+		 font   = Font,
 		 width  = Width,
 		 height = Height,
 		 images = load_images(),
@@ -387,7 +426,7 @@ level_continue(G) ->
 
 
 paint(G) ->
-    Goff = G#game.goff,
+    Panel = G#game.panel,
     gl:clear(?GL_COLOR_BUFFER_BIT bor ?GL_DEPTH_BUFFER_BIT),
     G1 = draw_maze(G),
     G2 = draw_score(G1),
@@ -397,7 +436,7 @@ paint(G) ->
 	    true ->
 		 play_demo(G3)
 	 end,
-    wxGLCanvas:swapBuffers(Goff),
+    wxGLCanvas:swapBuffers(Panel),
     G4.
 
 draw_maze(G) ->
@@ -457,15 +496,13 @@ draw_maze(G) ->
 
 draw_score(G) ->
     Image = G#game.images,
-    %% epixmap:draw_string(Goff,
-    %%  "Score: "+ integer_to_list(G#game.score),
-    %%  (G#game.scrsize div 2)+96, G#game.scrsize+16,
-    %%  G#game.smallfont, {0,96,128,255}),
     each(0, G#game.pacsleft-1,
 	 fun(I) ->
 		 draw_image(element(3, Image#images.pacman_left),
 			    I*28+8, G#game.height-1)
 	 end),
+    draw_text(G, {G#game.width div 2 - 30, G#game.height-8},
+	      io_lib:format("Score: ~.4.0w", [G#game.score]), {250, 250, 0}),
     G.
 
 
@@ -603,7 +640,8 @@ death(G) ->
 				  pacsleft = 0,
 				  ingame = false };
 		    true ->
-			 G#game { deathcounter = 0 }
+			 G#game { deathcounter = 0, 
+				  pacsleft = PacsLeft}
 		 end,
 	    level_continue(G1);
        true ->
@@ -612,6 +650,7 @@ death(G) ->
 
 
 show_intro_screen(G) ->
+    draw_text(G, {30, G#game.width div 2}, "Press 's' to start qame", {250,250,0}),
     G.
 
 move_pacman(G) ->
